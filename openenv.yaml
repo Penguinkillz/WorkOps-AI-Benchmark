@@ -1,0 +1,80 @@
+name: ai_workops_env
+description: realistic AI workplace simulation environment
+version: "0.1.0"
+
+endpoints:
+  reset:
+    method: POST
+    path: /reset
+  step:
+    method: POST
+    path: /step
+  state:
+    method: GET
+    path: /state
+  tasks:
+    method: GET
+    path: /tasks
+  grader:
+    method: POST
+    path: /grader
+  baseline:
+    method: GET
+    path: /baseline
+
+# Schemas are aligned with Pydantic models in app/models.py.
+# For exact machine-readable JSON Schema, call GET /tasks and read the `schemas` field.
+action_schema:
+  type: object
+  required: [type]
+  properties:
+    type:
+      type: string
+      description: Action type identifier (e.g. reply, ignore, escalate, resolve, refund).
+    task_id:
+      type: string
+      nullable: true
+    content:
+      type: string
+      nullable: true
+    metadata:
+      type: object
+      additionalProperties: true
+
+observation_schema:
+  type: object
+  required: [step, current_task_id, inbox, message]
+  properties:
+    step:
+      type: integer
+      minimum: 0
+    current_task_id:
+      type: string
+    inbox:
+      type: array
+      items:
+        type: object
+        required: [id, kind, subject, body, difficulty, metadata]
+        properties:
+          id: { type: string }
+          kind: { type: string, enum: [email, ticket, workflow] }
+          subject: { type: string }
+          body: { type: string }
+          difficulty: { type: string, enum: [easy, medium, hard] }
+          metadata:
+            type: object
+            additionalProperties: true
+    last_action:
+      nullable: true
+      $ref: "#/action_schema"
+    message:
+      type: string
+
+reward_description:
+  summary: >
+    Step reward is deterministic and manager-style: it combines correctness and
+    sequence order, applies time and delay penalties, scales by hidden priority
+    signals (VIP/urgency/risk), and penalizes noisy/repeated actions.
+  range:
+    step_reward: [-1.0, 1.0]
+    api_reward_value: [0.0, 1.0]
