@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.models import Action, EnvMetadata, InboxItem, Observation, Reward, State, StepResult
-from app.tasks import TaskDefinition, get_task, list_tasks, pick_task_by_difficulty
+from app.tasks import (
+    TaskDefinition,
+    get_task,
+    list_tasks,
+    max_steps_for_tasks,
+    pick_task_by_difficulty,
+)
 
 
 @dataclass
@@ -28,6 +34,7 @@ class Environment:
     def __init__(self, *, env_name: str = "ai_workops_env", max_steps: int = 8) -> None:
         self.env_name = env_name
         self.max_steps = max_steps
+        self._episode_max_steps = max_steps
         self._episode_id: str = ""
         self._history: List[Action] = []
         self._current_step: int = 0
@@ -62,6 +69,7 @@ class Environment:
         self._current_step = 0
         self._done = False
         self._info = {"progress": {}}
+        self._episode_max_steps = self.max_steps
 
         tasks: List[TaskDefinition]
         if task_id is not None:
@@ -75,6 +83,7 @@ class Environment:
             rng.shuffle(tasks)
 
         self._task_runtimes = {t.id: _TaskRuntime(definition=t) for t in tasks}
+        self._episode_max_steps = max_steps_for_tasks(tasks)
         self._inbox = [self._to_inbox_item(t) for t in tasks]
         self._sync_progress_info()
 
@@ -104,7 +113,7 @@ class Environment:
         self._current_step += 1
 
         # Termination conditions
-        if self._all_tasks_handled() or self._current_step >= self.max_steps:
+        if self._all_tasks_handled() or self._current_step >= self._episode_max_steps:
             self._done = True
 
         self._sync_progress_info()
@@ -121,7 +130,7 @@ class Environment:
             "progress": self._info.get("progress", {}),
             "reward_debug": reward_debug,
         }
-        if self._current_step >= self.max_steps and not self._all_tasks_handled():
+        if self._current_step >= self._episode_max_steps and not self._all_tasks_handled():
             info["termination_reason"] = "max_steps"
         elif self._all_tasks_handled():
             info["termination_reason"] = "all_tasks_handled"
@@ -147,7 +156,7 @@ class Environment:
             current_task_id=current_task_id,
             inbox=self.inbox,
             history=self.history,
-            metadata=EnvMetadata(timestep=self._current_step, max_steps=self.max_steps),
+            metadata=EnvMetadata(timestep=self._current_step, max_steps=self._episode_max_steps),
             done=self._done,
             info=dict(self._info),
         )
@@ -156,15 +165,79 @@ class Environment:
     # Internals
     # -----------------------
 
+    def _format_queue_subject_and_body(self, queue: List[Any]) -> Tuple[str, str]:
+        if not queue:
+            return "Inbox: 0 items", "No emails in queue."
+
+        first = queue[0] if isinstance(queue[0], dict) else {}
+        first_subject = str(first.get("subject", "")).strip() if isinstance(first, dict) else ""
+        if first_subject:
+            subject = first_subject if len(queue) == 1 else f"{first_subject} (+{len(queue) - 1} more)"
+        else:
+            subject = f"Inbox: {len(queue)} items"
+
+        lines: List[str] = []
+        for i, item in enumerate(queue, start=1):
+            if not isinstance(item, dict):
+                lines.append(f"{i}. Subject: (missing)")
+                lines.append(f"   Body: {str(item)}")
+                continue
+            lines.append(f"{i}. Subject: {str(item.get('subject') or '(missing)')}")
+            lines.append(f"   Body: {str(item.get('body') or '')}")
+            if item.get("sender") is not None:
+                lines.append(f"   Sender: {str(item.get('sender'))}")
+            if item.get("email_id") is not None:
+                lines.append(f"   ID: {str(item.get('email_id'))}")
+        return subject, "\n".join(lines)
+
+    def _format_ticket_subject_and_body(self, task_input: Dict[str, Any], fallback_desc: str) -> Tuple[str, str]:
+        ticket = task_input.get("ticket", {})
+        ticket_id = ticket.get("id", "")
+        order_id = ticket.get("order_id", "")
+        issue_type = ticket.get("issue_type", "support")
+        tone = task_input.get("tone", "")
+
+        subj = f"[{ticket_id}] {issue_type} issue" if ticket_id else f"Support: {issue_type}"
+        if order_id:
+            subj += f" (Order {order_id})"
+
+        lines: List[str] = []
+        if ticket_id:
+            lines.append(f"Ticket: {ticket_id}  Order: {order_id}  Type: {issue_type}  Tone: {tone}")
+        conversation = task_input.get("conversation", [])
+        if conversation:
+            lines.append("")
+            for msg in conversation:
+                if isinstance(msg, dict):
+                    sender = msg.get("from", "unknown")
+                    text = msg.get("message", "")
+                    lines.append(f"[{sender}]: {text}")
+        notes = task_input.get("internal_notes", {})
+        if isinstance(notes, dict) and notes:
+            lines.append("")
+            lines.append("Internal notes:")
+            for k, v in notes.items():
+                lines.append(f"  {k}: {v}")
+        body = "\n".join(lines) if lines else fallback_desc
+        return subj, body
+
     def _to_inbox_item(self, task: TaskDefinition) -> InboxItem:
-        subj = task.input.get("email", {}).get("subject") or task.input.get("ticket", {}).get("subject") or task.title
-        body = (
-            task.input.get("email", {}).get("body")
-            or task.input.get("ticket", {}).get("body")
-            or task.input.get("case", {}).get("issue")
-            or task.input.get("case", {}).get("issue_summary")
-            or task.description
-        )
+        queue = task.input.get("queue")
+        subj: str
+        body: str
+        if isinstance(queue, list):
+            subj, body = self._format_queue_subject_and_body(queue)
+        elif task.input.get("conversation") is not None or task.input.get("ticket") is not None:
+            subj, body = self._format_ticket_subject_and_body(task.input, task.description)
+        else:
+            subj = task.input.get("email", {}).get("subject") or task.input.get("ticket", {}).get("subject") or task.title
+            body = (
+                task.input.get("email", {}).get("body")
+                or task.input.get("ticket", {}).get("body")
+                or task.input.get("case", {}).get("issue")
+                or task.input.get("case", {}).get("issue_summary")
+                or task.description
+            )
         kind = "workflow" if task.difficulty == "hard" else ("ticket" if task.difficulty == "medium" else "email")
         visible_metadata = {k: v for k, v in dict(task.metadata).items() if k != "hidden"}
         return InboxItem(
@@ -201,7 +274,9 @@ class Environment:
         if action.metadata is None or not isinstance(action.metadata, dict):
             raise ValueError("Action.metadata must be an object")
 
-    def _apply_action(self, runtime: _TaskRuntime, action: Action) -> Tuple[float, Dict[str, float], bool]:
+    def _apply_action(
+        self, runtime: _TaskRuntime, action: Action
+    ) -> Tuple[float, Dict[str, float], bool, Dict[str, Any]]:
         """
         Compare `action` against the next expected action for the task.
 
@@ -406,9 +481,9 @@ class Environment:
         """
 
         # Max bonus if completing while still in first half of allowed steps.
-        if self.max_steps <= 0:
+        if self._episode_max_steps <= 0:
             return 0.0
-        ratio = self._current_step / float(self.max_steps)
+        ratio = self._current_step / float(self._episode_max_steps)
         if ratio <= 0.25:
             return 0.15
         if ratio <= 0.5:

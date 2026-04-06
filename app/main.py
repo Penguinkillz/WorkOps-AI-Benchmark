@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 
-from app.baseline import run_baseline
+from app.baseline import BaselineConfigError, run_baseline
 from app.env import Environment
 from app.grader import grade_state
 from app.models import Action, GraderRequest, GraderResponse, Observation, ResetRequest, State, StepResult
@@ -19,7 +19,7 @@ app = FastAPI(
 )
 
 # In-memory singleton environment (no external DB).
-ENV = Environment(env_name="ai_workops_env", max_steps=8)
+ENV = Environment(env_name="ai_workops_env", max_steps=16)
 
 
 @app.exception_handler(ValueError)
@@ -106,7 +106,17 @@ def baseline() -> Dict[str, Any]:
     Run the baseline agent across all tasks and return reproducible scores.
     """
 
-    raw = run_baseline(max_steps=ENV.max_steps)
+    try:
+        raw = run_baseline()
+    except BaselineConfigError as exc:
+        raise HTTPException(status_code=503, detail={"error": "llm_baseline_unavailable", "message": str(exc)}) from exc
+
     task_scores = {r["task_id"]: float(r["score"]) for r in raw["results"]}
-    return {"task_scores": task_scores, "average_score": float(raw["average_score"])}
+    return {
+        "task_scores": task_scores,
+        "average_score": float(raw["average_score"]),
+        "mode": raw.get("mode", "llm"),
+        "provider": raw.get("provider", "groq"),
+        "model": raw.get("model"),
+    }
 

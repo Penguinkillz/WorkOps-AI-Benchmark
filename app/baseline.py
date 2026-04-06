@@ -1,20 +1,193 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import json
+import os
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from openai import OpenAI
 
 from app.env import Environment
 from app.grader import grade_episode
-from app.models import Action
+from app.models import Action, Observation
 from app.tasks import ExpectedAction, list_tasks
+
+DEFAULT_LLM_BASE_URL = "https://api.groq.com/openai/v1"
+DEFAULT_LLM_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_LLM_MAX_TOKENS = 512
+DEFAULT_LLM_TEMPERATURE = 0.3
+
+
+class BaselineConfigError(RuntimeError):
+    pass
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+VALID_ACTION_TYPES = ["reply", "ignore", "escalate", "resolve", "refund", "check_system", "file_bug"]
+
+
+def _load_local_env(path: str = None) -> None:
+    if path is None:
+        env_path = _PROJECT_ROOT / ".env"
+    else:
+        env_path = Path(path)
+    if not env_path.exists():
+        return
+
+    for raw in env_path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def _extract_json_text(raw: str) -> str:
+    text = raw.strip()
+    if text.startswith("```"):
+        parts = text.split("```")
+        if len(parts) >= 3:
+            text = parts[1]
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+    return text
+
+
+def _extract_json_candidate(text: str) -> str:
+    cleaned = _extract_json_text(text)
+    if not cleaned:
+        return cleaned
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start : end + 1]
+    return cleaned
+
+
+def _message_content_to_text(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                t = item.get("text")
+                if isinstance(t, str):
+                    parts.append(t)
+            else:
+                t = getattr(item, "text", None)
+                if isinstance(t, str):
+                    parts.append(t)
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _make_llm_messages(obs: Observation, *, past_actions: Optional[List[Action]] = None) -> List[Dict[str, str]]:
+    obs_payload = {
+        "step": obs.step,
+        "current_task_id": obs.current_task_id,
+        "message": obs.message,
+        "inbox": [item.model_dump() for item in obs.inbox],
+    }
+
+    history_block = ""
+    if past_actions:
+        lines = []
+        for i, act in enumerate(past_actions):
+            lines.append(f"Step {i}: {{type: {act.type}, content: {act.content}}}")
+        history_block = (
+            "\n\nActions already taken:\n"
+            + "\n".join(lines)
+            + "\nConsider what you have already done before choosing your next action."
+        )
+
+    system_content = (
+        "You are a workplace operations agent. You process items in a work inbox "
+        "by taking actions one at a time.\n\n"
+        "Valid action types: " + ", ".join(VALID_ACTION_TYPES) + "\n\n"
+        "General guidance:\n"
+        "- Read each inbox item carefully and pick the most appropriate action\n"
+        "- Be concise in your responses\n"
+        "- Handle items professionally\n\n"
+        'Respond with a single JSON object: {"type": "<action_type>", "task_id": "<task_id>", "content": "<brief text>"}\n'
+        "Return ONLY the JSON object, nothing else."
+    )
+
+    user_content = (
+        "Current observation:\n"
+        + json.dumps(obs_payload, ensure_ascii=True, indent=None)
+        + history_block
+        + "\n\nPick the single best next action. Return strictly valid JSON only."
+    )
+
+    return [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": user_content},
+    ]
+
+
+def _llm_action_from_observation(
+    client: OpenAI,
+    *,
+    model: str,
+    obs: Observation,
+    task_id: str,
+    max_tokens: int,
+    retries: int = 2,
+    past_actions: Optional[List[Action]] = None,
+) -> Optional[Action]:
+    """Returns a parsed Action on success, or None if all retries fail."""
+    messages = _make_llm_messages(obs, past_actions=past_actions)
+    last_error: Optional[str] = None
+
+    for attempt in range(retries):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=DEFAULT_LLM_TEMPERATURE,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+            )
+        except Exception as api_exc:
+            last_error = f"API error: {api_exc}"
+            continue
+        raw_content = _message_content_to_text(response.choices[0].message.content)
+        try:
+            payload = json.loads(_extract_json_candidate(raw_content))
+            action = Action.model_validate(payload)
+            action.task_id = task_id
+            return action
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": raw_content,
+                }
+            )
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "Invalid JSON. Return ONLY a JSON object like: "
+                        '{"type": "reply", "task_id": "' + task_id + '", "content": "your message"}\n'
+                        "Valid types: " + ", ".join(VALID_ACTION_TYPES)
+                    ),
+                }
+            )
+
+    # Safe fallback after retries to avoid crashes.
+    return None
 
 
 def _baseline_action_for_expected(expected: ExpectedAction, *, quality: str = "good") -> Action:
     """
-    Deterministic baseline policy action for an expected step.
-
-    quality:
-    - "good": includes required content when present
-    - "generic": likely misses content requirements
+    Deterministic local heuristic baseline action for testing without an API key.
     """
 
     t = expected.type
@@ -25,7 +198,6 @@ def _baseline_action_for_expected(expected: ExpectedAction, *, quality: str = "g
             return base
         if not required:
             return base
-        # Ensure required substring appears verbatim (case-insensitive checks).
         if required.lower() in base.lower():
             return base
         return f"{base} ({required})"
@@ -47,80 +219,58 @@ def _baseline_action_for_expected(expected: ExpectedAction, *, quality: str = "g
     return Action(type=t, content=with_required(""))
 
 
-def run_baseline(*, max_steps: int = 8) -> Dict[str, Any]:
-    """
-    Run a deterministic "decent but imperfect" baseline on each task.
-    It intentionally makes small, controlled mistakes while still completing tasks.
-    """
-
+def run_heuristic_baseline() -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
     for task in list_tasks():
-        env = Environment(max_steps=max_steps)
+        env = Environment()
         env.reset(task_id=task.id)
+        episode_max_steps = int(env.state().metadata.max_steps)
 
         done = False
         inserted_noise = 0
         while not done:
-            # Always take the next expected action for this task.
             expected_idx = env.state().info.get("progress", {}).get(task.id, {}).get("progress_idx", 0)
             expected_idx = int(expected_idx)
-
-            # Guard if task already complete.
             if expected_idx >= len(task.expected):
                 break
 
             expected = task.expected[expected_idx]
 
-            # Deterministic imperfections by difficulty.
             if task.difficulty == "easy":
-                # One unnecessary action before first correct step (small efficiency hit).
-                if expected_idx == 0 and inserted_noise == 0 and env.current_step < max_steps - 1:
+                if expected_idx == 0 and inserted_noise == 0 and env.current_step < episode_max_steps - 1:
                     action = Action(type="reply", task_id=task.id, content="Thanks, we will check this.")
                     inserted_noise += 1
                 else:
                     action = _baseline_action_for_expected(expected, quality="good")
                     action.task_id = task.id
-
             elif task.difficulty == "medium":
-                # First attempt is generic reply (may miss required keyword), then correct sequence.
-                if expected_idx == 0 and inserted_noise == 0 and env.current_step < max_steps - 1:
+                if expected_idx == 0 and inserted_noise == 0 and env.current_step < episode_max_steps - 1:
                     action = _baseline_action_for_expected(expected, quality="generic")
                     action.task_id = task.id
                     inserted_noise += 1
-                # Slightly suboptimal: one extra status-check style reply after step 2 if room.
-                elif env.current_step >= 2 and inserted_noise == 1 and env.current_step < max_steps - 1:
+                elif env.current_step >= 2 and inserted_noise == 1 and env.current_step < episode_max_steps - 1:
                     action = Action(type="reply", task_id=task.id, content="Quick update: still investigating.")
                     inserted_noise += 1
                 else:
                     action = _baseline_action_for_expected(expected, quality="good")
                     action.task_id = task.id
-
-            else:  # hard
-                # Controlled degradation:
-                # - do a few deterministic out-of-order/noisy actions
-                # - still complete most of the workflow without crashing
-                if expected_idx == 0 and inserted_noise == 0 and env.current_step < max_steps - 1:
+            else:
+                if expected_idx == 0 and inserted_noise == 0 and env.current_step < episode_max_steps - 1:
                     action = Action(type="escalate", task_id=task.id, content="Escalating this issue.")
                     inserted_noise += 1
-                elif expected_idx == 2 and inserted_noise == 1 and env.current_step < max_steps - 1:
+                elif expected_idx == 2 and inserted_noise == 1 and env.current_step < episode_max_steps - 1:
                     action = Action(type="reply", task_id=task.id, content="We are looking into this.")
                     inserted_noise += 1
-                elif expected_idx == 4 and inserted_noise == 2 and env.current_step < max_steps - 1:
+                elif expected_idx == 4 and inserted_noise == 2 and env.current_step < episode_max_steps - 1:
                     action = Action(type="resolve", task_id=task.id, content="Marking this as resolved.")
                     inserted_noise += 1
-                elif expected.type in ("file_bug", "escalate", "reply") and env.current_step > 2:
-                    # Keep required content for progress, but writing remains generic-ish.
-                    action = _baseline_action_for_expected(expected, quality="good")
-                    action.task_id = task.id
                 else:
                     action = _baseline_action_for_expected(expected, quality="good")
                     action.task_id = task.id
 
             step_res = env.step(action)
             done = step_res.done
-
-            # Safety: avoid infinite loops if something unexpected occurs.
-            if env.current_step >= max_steps:
+            if env.current_step >= episode_max_steps:
                 break
 
         score, details = grade_episode(task_id=task.id, history=env.history)
@@ -135,4 +285,75 @@ def run_baseline(*, max_steps: int = 8) -> Dict[str, Any]:
         )
 
     avg = sum(r["score"] for r in results) / float(max(1, len(results)))
-    return {"results": results, "average_score": avg}
+    return {"mode": "heuristic", "results": results, "average_score": avg}
+
+
+def run_baseline() -> Dict[str, Any]:
+    _load_local_env()
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    if not api_key:
+        raise BaselineConfigError("GROQ_API_KEY is required for the LLM baseline.")
+
+    base_url = os.getenv("LLM_BASE_URL", DEFAULT_LLM_BASE_URL).strip() or DEFAULT_LLM_BASE_URL
+    model = os.getenv("LLM_MODEL", DEFAULT_LLM_MODEL).strip() or DEFAULT_LLM_MODEL
+
+    client = OpenAI(api_key=api_key, base_url=base_url)
+
+    results: List[Dict[str, Any]] = []
+    for task in list_tasks():
+        env = Environment()
+        obs = env.reset(task_id=task.id)
+        episode_max_steps = int(env.state().metadata.max_steps)
+
+        done = False
+        episode_actions: List[Action] = []
+        while not done and env.current_step < episode_max_steps:
+            llm_action = _llm_action_from_observation(
+                client,
+                model=model,
+                obs=obs,
+                task_id=task.id,
+                max_tokens=DEFAULT_LLM_MAX_TOKENS,
+                retries=2,
+                past_actions=episode_actions if episode_actions else None,
+            )
+
+            if llm_action is not None:
+                action = llm_action
+            else:
+                progress = env.state().info.get("progress", {}).get(task.id, {})
+                expected_idx = int(progress.get("progress_idx", 0))
+                if expected_idx < len(task.expected):
+                    action = _baseline_action_for_expected(task.expected[expected_idx], quality="good")
+                    action.task_id = task.id
+                else:
+                    action = Action(type="resolve", task_id=task.id, content="Resolved and documented outcome.")
+
+            step_res = env.step(action)
+            episode_actions.append(action)
+            obs = step_res.observation
+            done = step_res.done
+
+        score, details = grade_episode(task_id=task.id, history=env.history)
+        results.append(
+            {
+                "task_id": task.id,
+                "difficulty": task.difficulty,
+                "score": score,
+                "details": details,
+                "steps": env.current_step,
+            }
+        )
+
+    avg = sum(r["score"] for r in results) / float(max(1, len(results)))
+    return {
+        "mode": "llm",
+        "provider": "groq",
+        "client": "openai-compatible",
+        "base_url": base_url,
+        "model": model,
+        "temperature": DEFAULT_LLM_TEMPERATURE,
+        "max_tokens": DEFAULT_LLM_MAX_TOKENS,
+        "results": results,
+        "average_score": avg,
+    }

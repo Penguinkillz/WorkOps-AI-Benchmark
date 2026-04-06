@@ -47,7 +47,7 @@ class Reward(BaseModel):
 
 class EnvMetadata(BaseModel):
     timestep: int = 0
-    max_steps: int = 8
+    max_steps: int = 16
     priority: Literal["low", "normal", "high"] = "normal"
 
 

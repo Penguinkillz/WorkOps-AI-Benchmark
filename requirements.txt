@@ -1,4 +1,6 @@
-fastapi
-uvicorn
-pydantic
+fastapi==0.115.2
+uvicorn==0.32.0
+pydantic==2.9.2
 openenv-core
+openai==1.54.4
+requests>=2.31.0

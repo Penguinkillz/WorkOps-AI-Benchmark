@@ -1,57 +1,117 @@
-# AI WorkOps Environment — Real-World AI Agent Evaluation Benchmark
+# AI WorkOps Environment
 
-## Overview
-This project is an OpenEnv-compliant environment that simulates real business workflows for agent evaluation.
+## What This Is
+`ai_workops_env` is an OpenEnv-style operations benchmark for evaluating AI agents on realistic workplace tasks (not game mechanics). It focuses on practical skills: inbox triage, support handling, and multi-step internal workflows with deterministic scoring.
 
-Agents act like operations managers handling operational work items such as:
-email triage, customer support resolutions, and multi-step internal workflows.
+## Why This Matters
+Real-world operations work requires correct sequencing, prioritization, and safe execution under ambiguity. This environment measures those behaviors through constrained actions, structured observations, and reproducible grading.
 
-It is designed to evaluate AI agents on real-world decision-making: what to do, in what order, how quickly, and how to handle priority work correctly.
+## Action Space
+Agent actions are JSON objects matching `Action`:
+- `type` (string, required): action identifier, e.g. `reply`, `ignore`, `escalate`, `check_system`, `refund`, `file_bug`, `resolve`.
+- `task_id` (string, optional): target task. If omitted, environment uses `current_task_id`.
+- `content` (string, optional): free-form text used by content checks.
+- `metadata` (object, optional): extra action fields.
 
-## Key Features
-- Realistic task simulation (email triage, support, workflows)
-- Multi-step reasoning tasks with sequence-awareness
-- Hidden priority signals (VIP, urgency, risk) used for evaluation
-- Multi-factor reward system (correctness, efficiency, priority awareness, action quality)
-- Deterministic grading with a final score in the range `0..1`
-- OpenEnv-compliant API (FastAPI + Pydantic schemas)
-- Baseline agent included (a “decent but imperfect employee”)
+## Observation Space
+Each step returns `Observation`:
+- `step` (int): current timestep.
+- `current_task_id` (string): active task id.
+- `inbox` (array of `InboxItem`): each item has:
+  - `id`, `kind`, `subject`, `body`, `difficulty`, `metadata`.
+- `last_action` (optional `Action`): previous action.
+- `message` (string): environment status text.
 
-## Environment Design
-The environment follows a standard OpenEnv loop:
-
-- **Observation space**: the agent sees remaining inbox items plus the last action taken.
-- **Action space**: operations manager actions (e.g., `reply`, `ignore`, `escalate`, `refund`, `file_bug`, `check_system`, `resolve`), with optional content.
-- **State transitions**: each `step()` validates and applies the action to the correct task, updating internal progress and inbox state.
-- **Reward logic (high level)**: reward is shaped by correctness + order/sequence, reduced by time and poor behavior, and scaled by hidden VIP/urgency/risk importance.
+Hidden policy metadata is used internally for reward/grading and is not exposed in observations.
 
 ## Tasks
-- **Easy: Email triage**
-  A batch of realistic emails (refund request, spam, urgent bug report, VIP message). The agent must triage using `reply`, `ignore`, or `escalate`.
+- `easy_email_triage` (easy)
+  - Objective: triage a queue of realistic emails in sequence using `reply`, `ignore`, `escalate`.
+- `medium_support_resolution` (medium)
+  - Objective: handle support conversation variants with variant-specific expected flows (login vs refund).
+- `hard_workflow_refund_bug_escalation` (hard)
+  - Objective: complete a six-step workflow across system check, refund, bug filing, escalation, customer reply, and resolve.
 
-- **Medium: Support resolution**
-  A multi-message support conversation with explicit tone and contextual fields (order id, issue type). The agent must `reply` with a proper resolution and then `resolve`, escalating when needed.
+## Rewards and Grading
+Environment step rewards are deterministic and exposed via `Reward.value` in the range `[0.0, 1.0]`.
+Internal reward components may go negative before clamping; the API output is clamped to `[0.0, 1.0]`.
 
-- **Hard: Multi-step workflow**
-  A complex operational case involving conflicting internal system status and hidden VIP context. The agent must follow a multi-step sequence: check internal systems, act on the refund, file the bug, escalate to engineering, respond, and resolve.
+Episode grading (`/grader`) outputs a deterministic final score in `[0.0, 1.0]`.
 
-## Evaluation
-Scoring is deterministic and intended to reflect a manager-style review of agent performance.
+## Max Steps and Termination
+Per-episode step caps are difficulty-aware:
+- easy: 10
+- medium: 12
+- hard: 16
 
-- **Grader components**
-  - Completion score: did the agent finish the expected action sequence?
-  - Correctness score: were actions aligned to the expected plan and order?
-  - Efficiency score: fewer steps (relative to the optimal plan) earns higher credit.
-  - Priority handling score: correct treatment of VIP/urgent/high-risk work increases the score.
+Episodes terminate on either:
+- all expected task steps handled, or
+- max step limit reached.
 
-- **Final score**
-  The final score is normalized to `0..1` using a weighted combination:
-  `0.4 * correctness + 0.2 * completion + 0.2 * efficiency + 0.2 * priority_handling`
+## Setup (Local)
+```bash
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 7860
+```
 
-- **Why the baseline is imperfect**
-  The included baseline agent is deliberately “good but not perfect”: it makes controlled mistakes such as occasional suboptimal ordering, generic responses, and small efficiency losses. This creates meaningful evaluation signal for stronger agents.
+Service URL: `http://127.0.0.1:7860`
 
-## API Endpoints
+## Docker
+```bash
+docker build -t ai-workops-env .
+docker run -p 7860:7860 ai-workops-env
+```
+
+Health check:
+```bash
+curl http://127.0.0.1:7860/
+```
+
+## Baseline (Groq via OpenAI-Compatible Client)
+The submission baseline is LLM-based and uses Groq with the OpenAI-compatible `openai` Python client.
+
+Required env var:
+- `GROQ_API_KEY`
+
+Optional env vars:
+- `LLM_BASE_URL` (default: `https://api.groq.com/openai/v1`)
+- `LLM_MODEL` (default: `llama-3.3-70b-versatile`)
+
+Local convenience:
+- Put these values in `.env` (already supported by baseline loader) so you do not need to export env vars every run.
+- Keep `.env` local only (it is git-ignored).
+
+Baseline runtime settings:
+- `temperature = 0.3`
+- capped completion tokens per step
+- max episode steps enforced by environment
+
+### `/baseline` behavior
+- If `GROQ_API_KEY` is missing: returns HTTP `503` with `llm_baseline_unavailable`.
+- If key is present: runs LLM baseline and returns per-task scores + average.
+
+### Heuristic Baseline (local debug only)
+A deterministic heuristic baseline is retained in code as `run_heuristic_baseline()` for local testing and regression checks without API credentials.
+
+### Baseline Scores
+
+Heuristic baseline (deterministic, no API key needed):
+
+| Task | Score |
+|---|---:|
+| easy_email_triage | 0.8420 |
+| medium_support_resolution | 0.7160 |
+| hard_workflow_refund_bug_escalation | 0.7511 |
+| **Average** | **0.7697** |
+
+LLM baseline (`GET /baseline`, requires `GROQ_API_KEY`): scores vary per run due to `temperature = 0.3`; typical average is **0.33 - 0.70** depending on the model and prompt alignment.
+
+## Hugging Face Space
+- Uses provided `Dockerfile` and port `7860`
+- Add `openenv` tag if hackathon rules require it
+
+## Endpoints
+- `GET /`
 - `POST /reset`
 - `POST /step`
 - `GET /state`
@@ -59,37 +119,7 @@ Scoring is deterministic and intended to reflect a manager-style review of agent
 - `POST /grader`
 - `GET /baseline`
 
-## Running Locally
-1. Install dependencies:
-   - `pip install -r requirements.txt`
-2. Start the server:
-   - `uvicorn app.main:app --reload`
+These match `openenv.yaml`.
 
-The API runs on `http://127.0.0.1:8000` by default.
-
-## Docker
-Build:
-- `docker build -t ai-workops-env .`
-
-Run:
-- `docker run -p 7860:7860 ai-workops-env`
-
-Inside Docker, the service runs on `http://127.0.0.1:7860`.
-
-## Hugging Face Deployment
-To deploy on Hugging Face Spaces, set the container to listen on port `7860` (already configured in the Dockerfile).
-
-Typical workflow:
-- Build the Docker image locally (optional).
-- Push the code to a Space repository.
-- Configure the Space to use the Dockerfile build.
-
-Space link: `https://huggingface.co/spaces/<your-username>/<your-space-name>`
-
-## Why This Matters
-This is not a toy benchmark.
-
-It evaluates practical agent abilities that matter in real operations:
-sequencing, prioritization, efficient task handling, and behavior under ambiguity.
-
-The deterministic 0..1 scoring and OpenEnv-compatible API make it useful for RL training loops and agent benchmarking in hackathon and competition settings.
+## OpenEnv / Provider Note
+Client library is OpenAI-compatible, provider is Groq. If your platform only accepts `OPENAI_API_KEY` secrets, follow organizer instructions for secret mapping rather than relabeling providers in docs.

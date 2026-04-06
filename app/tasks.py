@@ -143,47 +143,62 @@ def build_task_catalog() -> TaskCatalog:
         },
     )
 
+    medium_input = pick(
+        "medium_support_resolution",
+        [
+            {
+                "variant_id": "login_reset",
+                "ticket": {"id": "TCK-1042", "order_id": "ORD-55231", "issue_type": "login"},
+                "tone": "angry",
+                "conversation": [
+                    {
+                        "from": "customer",
+                        "message": "I reset my password THREE times and your app still says 'invalid token'. This is ridiculous.",
+                    },
+                    {"from": "agent", "message": "Sorry about that. Can you share the exact error and device/browser?"},
+                    {
+                        "from": "customer",
+                        "message": "Chrome on Windows. Error: invalid token. I need access today.",
+                    },
+                ],
+                "internal_notes": {"known_issue": "stale browser cache after reset", "safe_fix": "clear cache + retry"},
+            },
+            {
+                "variant_id": "refund_duplicate",
+                "ticket": {"id": "TCK-1188", "order_id": "ORD-60019", "issue_type": "refund"},
+                "tone": "polite",
+                "conversation": [
+                    {"from": "customer", "message": "Hi! I was billed twice for my subscription renewal (ORD-60019)."},
+                    {"from": "customer", "message": "Could you please refund the duplicate charge? Thank you."},
+                ],
+                "internal_notes": {"known_issue": "duplicate renewal charge in rare cases", "requires": "escalate_billing"},
+            },
+        ],
+    )
+
+    medium_variant_id = str(medium_input.get("variant_id", "login_reset"))
+    if medium_variant_id == "refund_duplicate":
+        medium_expected = [
+            ExpectedAction(type="reply", content_contains="refund"),
+            ExpectedAction(type="escalate", content_contains="billing"),
+            ExpectedAction(type="resolve"),
+        ]
+    else:
+        medium_expected = [
+            ExpectedAction(type="reply", content_contains="clear"),
+            ExpectedAction(type="resolve"),
+        ]
+
     medium = TaskDefinition(
         id="medium_support_resolution",
         difficulty="medium",
         title="Support conversation: resolve or escalate",
         description="Handle a realistic support conversation with context, tone, and order details.",
-        input=pick(
-            "medium_support_resolution",
-            [
-                {
-                    "ticket": {"id": "TCK-1042", "order_id": "ORD-55231", "issue_type": "login"},
-                    "tone": "angry",
-                    "conversation": [
-                        {
-                            "from": "customer",
-                            "message": "I reset my password THREE times and your app still says 'invalid token'. This is ridiculous.",
-                        },
-                        {"from": "agent", "message": "Sorry about that. Can you share the exact error and device/browser?"},
-                        {
-                            "from": "customer",
-                            "message": "Chrome on Windows. Error: invalid token. I need access today.",
-                        },
-                    ],
-                    "internal_notes": {"known_issue": "stale browser cache after reset", "safe_fix": "clear cache + retry"},
-                },
-                {
-                    "ticket": {"id": "TCK-1188", "order_id": "ORD-60019", "issue_type": "refund"},
-                    "tone": "polite",
-                    "conversation": [
-                        {"from": "customer", "message": "Hi! I was billed twice for my subscription renewal (ORD-60019)."},
-                        {"from": "customer", "message": "Could you please refund the duplicate charge? Thank you."},
-                    ],
-                    "internal_notes": {"known_issue": "duplicate renewal charge in rare cases", "requires": "escalate_billing"},
-                },
-            ],
-        ),
-        expected=[
-            ExpectedAction(type="reply", content_contains="clear"),
-            ExpectedAction(type="resolve"),
-        ],
+        input=medium_input,
+        expected=medium_expected,
         metadata={
             "domain": "support",
+            "variant_id": medium_variant_id,
             "expected_policy": "Give the correct resolution; escalate billing/system issues when required.",
             "hidden": {
                 "vip_flag": False,
@@ -271,3 +286,20 @@ def get_task(task_id: str) -> TaskDefinition:
 def pick_task_by_difficulty(difficulty: Literal["easy", "medium", "hard"]) -> TaskDefinition:
     catalog = build_task_catalog()
     return {"easy": catalog.easy, "medium": catalog.medium, "hard": catalog.hard}[difficulty]
+
+
+TASK_MAX_STEPS_BY_DIFFICULTY: Dict[str, int] = {
+    "easy": 10,
+    "medium": 12,
+    "hard": 16,
+}
+
+
+def task_max_steps(task: TaskDefinition) -> int:
+    return int(TASK_MAX_STEPS_BY_DIFFICULTY.get(task.difficulty, 12))
+
+
+def max_steps_for_tasks(tasks: List[TaskDefinition]) -> int:
+    if not tasks:
+        return 12
+    return max(task_max_steps(t) for t in tasks)
