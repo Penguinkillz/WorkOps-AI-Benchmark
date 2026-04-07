@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -37,13 +37,16 @@ def health() -> Dict[str, str]:
 
 
 @app.post("/reset", response_model=Observation)
-def reset(req: ResetRequest) -> Observation:
+def reset(req: Optional[ResetRequest] = None) -> Observation:
     """
     Reset the environment.
     - If req.task_id is provided, resets into that task only.
     - If req.difficulty is provided, picks a task by difficulty.
     - Otherwise loads the canonical task set.
     """
+
+    if req is None:
+        req = ResetRequest()
 
     try:
         return ENV.reset(task_id=req.task_id, difficulty=req.difficulty)
