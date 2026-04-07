@@ -5,7 +5,7 @@ inference.py - OpenEnv Submission Inference Script for ai_workops_env
 Mandatory env vars (set by evaluator):
     API_BASE_URL   The API endpoint for the LLM.
     MODEL_NAME     The model identifier to use for inference.
-    HF_TOKEN       Your Hugging Face / API key.
+    API_KEY        Proxy API key injected by validator.
 
 Optional env vars:
     LOCAL_IMAGE_NAME   Docker image to start (if using from_docker_image pattern).
@@ -26,13 +26,7 @@ from openai import OpenAI
 # Mandatory env vars per hackathon spec
 # Defaults set ONLY for API_BASE_URL and MODEL_NAME (not HF_TOKEN)
 # ---------------------------------------------------------------------------
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
-API_KEY = os.getenv("API_KEY")
-
-# Local-dev fallbacks only. Validator path should provide API_KEY.
-if not API_KEY:
-    API_KEY = os.getenv("HF_TOKEN") or os.getenv("GROQ_API_KEY")
 
 # ---------------------------------------------------------------------------
 # Environment connection
@@ -289,18 +283,19 @@ def main() -> None:
             return
 
         client: Optional[OpenAI] = None
-        if not API_KEY:
-            print("[DEBUG] API_KEY missing; using heuristic fallback only.", file=sys.stderr, flush=True)
-        else:
-            try:
-                client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
-            except Exception as exc:
-                print(
-                    f"[DEBUG] OpenAI client init failed ({exc}); using heuristic fallback only.",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                client = None
+        try:
+            # Required by validator: use injected proxy credentials directly.
+            client = OpenAI(
+                base_url=os.environ["API_BASE_URL"],
+                api_key=os.environ["API_KEY"],
+            )
+        except Exception as exc:
+            print(
+                f"[DEBUG] OpenAI client init failed ({exc}); no LLM calls will be made.",
+                file=sys.stderr,
+                flush=True,
+            )
+            client = None
 
         try:
             tasks_resp = env_get("/tasks")
