@@ -1,116 +1,69 @@
 # AI WorkOps Environment
 
-## What This Is
-`ai_workops_env` is an OpenEnv-style operations benchmark for evaluating AI agents on realistic workplace tasks (not game mechanics). It focuses on practical skills: inbox triage, support handling, and multi-step internal workflows with deterministic scoring.
+`ai_workops_env` is a production-style OpenEnv benchmark for evaluating AI agents on realistic operations workflows: inbox triage, support resolution, and cross-functional incident handling.
 
-## Why This Matters
-Real-world operations work requires correct sequencing, prioritization, and safe execution under ambiguity. This environment measures those behaviors through constrained actions, structured observations, and reproducible grading.
+## Problem Statement
 
-## Action Space
-Agent actions are JSON objects matching `Action`:
-- `type` (string, required): action identifier, e.g. `reply`, `ignore`, `escalate`, `check_system`, `refund`, `file_bug`, `resolve`.
-- `task_id` (string, optional): target task. If omitted, environment uses `current_task_id`.
-- `content` (string, optional): free-form text used by content checks.
-- `metadata` (object, optional): extra action fields.
+Most agent environments test game mechanics or synthetic tasks. Real organizations need agents that can:
+- interpret ambiguous customer and internal messages,
+- choose the right operational action sequence under time pressure,
+- avoid noisy or unsafe actions, and
+- resolve work with measurable quality.
 
-## Observation Space
-Each step returns `Observation`:
-- `step` (int): current timestep.
-- `current_task_id` (string): active task id.
-- `inbox` (array of `InboxItem`): each item has:
-  - `id`, `kind`, `subject`, `body`, `difficulty`, `metadata`.
-- `last_action` (optional `Action`): previous action.
-- `message` (string): environment status text.
+This project models that gap with deterministic tasks, typed APIs, and reproducible grading.
 
-Hidden policy metadata is used internally for reward/grading and is not exposed in observations.
+## Why This Environment Exists
 
-## Tasks
-- `easy_email_triage` (easy)
-  - Objective: triage a queue of realistic emails in sequence using `reply`, `ignore`, `escalate`.
-- `medium_support_resolution` (medium)
-  - Objective: handle support conversation variants with variant-specific expected flows (login vs refund).
-- `hard_workflow_refund_bug_escalation` (hard)
-  - Objective: complete a six-step workflow across system check, refund, bug filing, escalation, customer reply, and resolve.
+The benchmark is designed for practical agent evaluation in business operations contexts:
+- **Real-world utility:** tasks resemble daily support/ops workflows.
+- **Structured evaluation:** clear expected trajectories and deterministic scoring.
+- **Partial-credit learning signal:** reward shaping captures progress, timing, and quality.
+- **OpenEnv compatibility:** standard `reset()` / `step()` / `state()` interface for agent runners.
 
-## Rewards and Grading
-Environment step rewards are deterministic and exposed via `Reward.value` in the range `[0.0, 1.0]`.
-Internal reward components may go negative before clamping; the API output is clamped to `[0.0, 1.0]`.
+## Environment Overview
 
-Episode grading (`/grader`) outputs a deterministic final score in `[0.0, 1.0]`.
+### Task Set
+- `easy_email_triage` (easy): process an email queue with `reply`, `ignore`, and `escalate`.
+- `medium_support_resolution` (medium): handle support variants with scenario-aware expectations.
+- `hard_workflow_refund_bug_escalation` (hard): execute a multi-step workflow across checks, refunding, bug filing, escalation, and closure.
 
-## Max Steps and Termination
-Per-episode step caps are difficulty-aware:
-- easy: 10
-- medium: 12
-- hard: 16
+### Episode Boundaries
+- easy: 10 max steps
+- medium: 12 max steps
+- hard: 16 max steps
 
-Episodes terminate on either:
-- all expected task steps handled, or
-- max step limit reached.
+Episodes end when expected steps are completed or max steps are reached.
 
-## Setup (Local)
-```bash
-pip install -r requirements.txt
-uvicorn app.main:app --host 0.0.0.0 --port 7860
-```
+## API Contract (OpenEnv-style)
 
-Service URL: `http://127.0.0.1:7860`
+### Action
+`Action` is a JSON object with:
+- `type` (required string): e.g. `reply`, `ignore`, `escalate`, `check_system`, `refund`, `file_bug`, `resolve`
+- `task_id` (optional string): defaults to `current_task_id`
+- `content` (optional string): response or rationale text
+- `metadata` (optional object): extra context
 
-## Docker
-```bash
-docker build -t ai-workops-env .
-docker run -p 7860:7860 ai-workops-env
-```
+### Observation
+`Observation` returns:
+- `step` (int)
+- `current_task_id` (string)
+- `inbox` (array of `InboxItem`)
+- `last_action` (optional `Action`)
+- `message` (string)
 
-Health check:
-```bash
-curl http://127.0.0.1:7860/
-```
+`InboxItem` includes:
+- `id`, `kind`, `subject`, `body`, `difficulty`, `metadata`
 
-## Baseline (Groq via OpenAI-Compatible Client)
-The submission baseline is LLM-based and uses Groq with the OpenAI-compatible `openai` Python client.
+## Reward and Grading
 
-Required env var:
-- `GROQ_API_KEY`
+- Step-level reward is deterministic and exposed as `Reward.value` in `[0.0, 1.0]`.
+- Internal components can be negative before clamp, then normalized to `[0.0, 1.0]`.
+- Final episode score via `POST /grader` is deterministic in `[0.0, 1.0]`.
 
-Optional env vars:
-- `LLM_BASE_URL` (default: `https://api.groq.com/openai/v1`)
-- `LLM_MODEL` (default: `llama-3.3-70b-versatile`)
-
-Local convenience:
-- Put these values in `.env` (already supported by baseline loader) so you do not need to export env vars every run.
-- Keep `.env` local only (it is git-ignored).
-
-Baseline runtime settings:
-- `temperature = 0.3`
-- capped completion tokens per step
-- max episode steps enforced by environment
-
-### `/baseline` behavior
-- If `GROQ_API_KEY` is missing: returns HTTP `503` with `llm_baseline_unavailable`.
-- If key is present: runs LLM baseline and returns per-task scores + average.
-
-### Heuristic Baseline (local debug only)
-A deterministic heuristic baseline is retained in code as `run_heuristic_baseline()` for local testing and regression checks without API credentials.
-
-### Baseline Scores
-
-Heuristic baseline (deterministic, no API key needed):
-
-| Task | Score |
-|---|---:|
-| easy_email_triage | 0.8420 |
-| medium_support_resolution | 0.7160 |
-| hard_workflow_refund_bug_escalation | 0.7511 |
-| **Average** | **0.7697** |
-
-LLM baseline (`GET /baseline`, requires `GROQ_API_KEY`): scores vary per run due to `temperature = 0.3`; typical average is **0.33 - 0.70** depending on the model and prompt alignment.
-
-## Hugging Face Space
-- Uses provided `Dockerfile` and port `7860`
-- Add `openenv` tag if hackathon rules require it
+The reward function includes correctness, ordering, efficiency, and penalties for repetition/noise.
 
 ## Endpoints
+
 - `GET /`
 - `POST /reset`
 - `POST /step`
@@ -119,7 +72,82 @@ LLM baseline (`GET /baseline`, requires `GROQ_API_KEY`): scores vary per run due
 - `POST /grader`
 - `GET /baseline`
 
-These match `openenv.yaml`.
+Endpoint definitions align with `openenv.yaml`.
 
-## OpenEnv / Provider Note
-Client library is OpenAI-compatible, provider is Groq. If your platform only accepts `OPENAI_API_KEY` secrets, follow organizer instructions for secret mapping rather than relabeling providers in docs.
+## Project Structure
+
+- `app/main.py`: FastAPI entrypoint and routes
+- `app/env.py`: environment dynamics and reward logic
+- `app/tasks.py`: canonical tasks and expected flows
+- `app/grader.py`: deterministic grading logic
+- `app/models.py`: typed action/observation/state/reward schemas
+- `app/baseline.py`: baseline runners (LLM + heuristic)
+- `inference.py`: submission inference script with required stdout protocol
+- `openenv.yaml`: endpoint/spec metadata
+- `Dockerfile`: containerized runtime for local/HF deployment
+
+## Local Development
+
+### Requirements
+- Python 3.10+
+- pip
+
+### Run locally
+```bash
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 7860
+```
+
+Health check:
+```bash
+curl http://127.0.0.1:7860/
+```
+
+## Docker
+
+```bash
+docker build -t ai-workops-env .
+docker run -p 7860:7860 ai-workops-env
+```
+
+## Validation
+
+```bash
+openenv validate
+```
+
+Expected: validation passes with deployment-ready status.
+
+## Baselines
+
+### LLM baseline (`GET /baseline`)
+Uses OpenAI-compatible client with Groq endpoint.
+
+Env vars:
+- required: `GROQ_API_KEY`
+- optional: `LLM_BASE_URL` (default `https://api.groq.com/openai/v1`)
+- optional: `LLM_MODEL` (default `llama-3.3-70b-versatile`)
+
+If the key is missing, endpoint returns HTTP `503` with `llm_baseline_unavailable`.
+
+### Heuristic baseline
+`run_heuristic_baseline()` provides deterministic local regression checks without credentials.
+
+Sample heuristic scores:
+
+| Task | Score |
+|---|---:|
+| easy_email_triage | 0.8420 |
+| medium_support_resolution | 0.7160 |
+| hard_workflow_refund_bug_escalation | 0.7511 |
+| **Average** | **0.7697** |
+
+## Submission Notes
+
+- `inference.py` is placed at repo root and follows required `[START]`, `[STEP]`, `[END]` stdout format.
+- API-facing scores are normalized to `[0,1]`.
+- Docker build and OpenEnv validation are part of pre-submission checks.
+
+## License
+
+For hackathon evaluation use. Add your preferred license if publishing publicly beyond the competition.
