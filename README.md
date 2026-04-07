@@ -1,6 +1,6 @@
 ---
 title: WorkOps AI Benchmark
-emoji: ''
+emoji: robot
 colorFrom: blue
 colorTo: indigo
 sdk: docker
