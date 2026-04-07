@@ -1,3 +1,12 @@
+---
+title: WorkOps AI Benchmark
+emoji: ''
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+---
+
 # AI WorkOps Environment
 
 `ai_workops_env` is a production-style OpenEnv benchmark for evaluating AI agents on realistic operations workflows: inbox triage, support resolution, and cross-functional incident handling.
