@@ -26,12 +26,13 @@ from openai import OpenAI
 # Mandatory env vars per hackathon spec
 # Defaults set ONLY for API_BASE_URL and MODEL_NAME (not HF_TOKEN)
 # ---------------------------------------------------------------------------
-API_BASE_URL = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
-HF_TOKEN = os.getenv("HF_TOKEN")
+API_KEY = os.getenv("API_KEY")
 
-if not HF_TOKEN:
-    HF_TOKEN = os.getenv("GROQ_API_KEY") or os.getenv("API_KEY")
+# Local-dev fallbacks only. Validator path should provide API_KEY.
+if not API_KEY:
+    API_KEY = os.getenv("HF_TOKEN") or os.getenv("GROQ_API_KEY")
 
 # ---------------------------------------------------------------------------
 # Environment connection
@@ -288,11 +289,11 @@ def main() -> None:
             return
 
         client: Optional[OpenAI] = None
-        if not HF_TOKEN:
-            print("[DEBUG] HF_TOKEN missing; using heuristic fallback only.", file=sys.stderr, flush=True)
+        if not API_KEY:
+            print("[DEBUG] API_KEY missing; using heuristic fallback only.", file=sys.stderr, flush=True)
         else:
             try:
-                client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+                client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
             except Exception as exc:
                 print(
                     f"[DEBUG] OpenAI client init failed ({exc}); using heuristic fallback only.",
