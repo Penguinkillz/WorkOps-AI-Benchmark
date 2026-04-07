@@ -45,6 +45,22 @@ TEMPERATURE = 0.3
 MAX_TOKENS = 512
 SUCCESS_THRESHOLD = 0.1
 
+SCORE_MIN = 0.01
+SCORE_MAX = 0.99
+
+
+def normalize_submission_score(raw_score: float) -> float:
+    """Validator requires score strictly within (0,1)."""
+    try:
+        value = float(raw_score)
+    except Exception:
+        value = 0.5
+    if value <= SCORE_MIN:
+        return SCORE_MIN
+    if value >= SCORE_MAX:
+        return SCORE_MAX
+    return value
+
 VALID_ACTION_TYPES = [
     "reply", "ignore", "escalate", "resolve",
     "refund", "check_system", "file_bug",
@@ -341,7 +357,7 @@ def main() -> None:
 
                 grade = env_post("/grader", {"task_id": task_id})
                 score = float(grade.get("score", 0.0))
-                score = min(max(score, 0.0), 1.0)
+                score = normalize_submission_score(score)
                 success = score >= SUCCESS_THRESHOLD
 
             except Exception as exc:
@@ -350,6 +366,7 @@ def main() -> None:
                     file=sys.stderr,
                     flush=True,
                 )
+                score = normalize_submission_score(score)
 
             finally:
                 log_end(
