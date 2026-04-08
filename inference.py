@@ -5,7 +5,7 @@ inference.py - OpenEnv Submission Inference Script for ai_workops_env
 Mandatory env vars (set by evaluator):
     API_BASE_URL   The API endpoint for the LLM.
     MODEL_NAME     The model identifier to use for inference.
-    API_KEY        Proxy API key injected by validator.
+    HF_TOKEN       Your Hugging Face / API key.
 
 Optional env vars:
     LOCAL_IMAGE_NAME   Docker image to start (if using from_docker_image pattern).
@@ -26,9 +26,9 @@ from openai import OpenAI
 # Mandatory env vars per hackathon spec
 # Defaults set ONLY for API_BASE_URL and MODEL_NAME (not HF_TOKEN)
 # ---------------------------------------------------------------------------
-API_BASE_URL = os.getenv("API_BASE_URL")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
-API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN")
+HF_TOKEN = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 
 # ---------------------------------------------------------------------------
 # Environment connection
@@ -304,15 +304,15 @@ def main() -> None:
             return
 
         client: Optional[OpenAI] = None
-        if not API_BASE_URL or not API_KEY:
+        if not HF_TOKEN:
             print(
-                "[DEBUG] Missing API_BASE_URL/API_KEY (or HF_TOKEN). Running heuristic-only mode.",
+                "[DEBUG] Missing HF_TOKEN/API_KEY. Running heuristic-only mode.",
                 file=sys.stderr,
                 flush=True,
             )
         else:
             try:
-                client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
+                client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
                 warmup_proxy_call(client)
             except Exception as exc:
                 print(
